@@ -94,6 +94,7 @@ mountModuleHTML(".app", "afterend", `
                     <strong>Show on elements</strong>
                     <label><input type="checkbox" value="id" checked> Element ID</label>
                     <label><input type="checkbox" value="length"> Length (m)</label>
+                    <label><input type="checkbox" value="angle"> Angle between elements (°)</label>
                     <label class="fs-label-area-option"><input type="checkbox" value="area"> Area A (m²)</label>
                     <label><input type="checkbox" value="inertia" checked> Inertia I (m⁴)</label>
                     <label class="fs-label-grid-option"><input type="checkbox" value="torsion"> Torsion constant J (m⁴)</label>
@@ -940,6 +941,70 @@ function getStructureSVG(width, height, camera, mode = "model") {
             }
         }
     });
+
+    // "Angle between elements" label option: at every node where two or more
+    // elements meet, show the angle BETWEEN each pair of neighbouring elements
+    // (not the angle from the global axis). Right / straight / reflex angles
+    // (90, 180, 270, 360 deg) are obvious, so they are never labelled.
+    if (mode === "model" && fsElementLabelKeys.includes("angle")) {
+        const OBVIOUS = [90, 180, 270, 360];
+        const TOL = 0.05;
+        model.nodes.forEach((n) => {
+            const cx = tx(n.x), cy = ty(n.y);
+            const dirs = [];
+            const lens = [];
+            model.elements.forEach((el) => {
+                let other = null;
+                if (String(el.startNode) === String(n.id)) other = model.nodes.find((m) => String(m.id) === String(el.endNode));
+                else if (String(el.endNode) === String(n.id)) other = model.nodes.find((m) => String(m.id) === String(el.startNode));
+                if (!other) return;
+                const dx = Number(other.x) - Number(n.x), dy = Number(other.y) - Number(n.y);
+                if (Math.hypot(dx, dy) < 1e-9) return;
+                let a = Math.atan2(dy, dx) * 180 / Math.PI;
+                if (a < 0) a += 360;
+                if (dirs.some((d) => Math.min(Math.abs(d - a), 360 - Math.abs(d - a)) < 1e-6)) return;
+                dirs.push(a);
+                lens.push(Math.hypot(tx(other.x) - cx, ty(other.y) - cy));
+            });
+            if (dirs.length < 2) return;
+            const order = dirs.map((a, i) => i).sort((i, j) => dirs[i] - dirs[j]);
+            const pairs = [];
+            for (let k = 0; k < order.length; k++) {
+                const a1 = dirs[order[k]];
+                let a2 = dirs[order[(k + 1) % order.length]];
+                let gap = a2 - a1;
+                if (gap <= 0) gap += 360;
+                pairs.push({ a1, gap, minLen: Math.min(lens[order[k]], lens[order[(k + 1) % order.length]]) });
+            }
+            // Two elements only: the single angle between them is the smaller one.
+            const shown = dirs.length === 2
+                ? [pairs.reduce((best, q) => (q.gap < best.gap ? q : best))]
+                : pairs;
+            shown.forEach((q) => {
+                if (q.gap < TOL || OBVIOUS.some((v) => Math.abs(q.gap - v) < TOL)) return;
+                // Reflex gaps (> 180 deg) are the outside of the joint, not an
+                // angle "between" two elements, so they are not drawn.
+                if (dirs.length > 2 && q.gap > 180) return;
+                const r = Math.max(18, Math.min(30, q.minLen * 0.4));
+                const rad = (v) => v * Math.PI / 180;
+                const pt = (ang, rr) => [cx + rr * Math.cos(rad(ang)), cy - rr * Math.sin(rad(ang))];
+                // Members are drawn ~9px wide, so keep the arc at the member edges.
+                let inset = Math.asin(Math.min(1, 5.5 / r)) * 180 / Math.PI;
+                const minSpan = Math.min(10, q.gap * 0.5);
+                if (q.gap - 2 * inset < minSpan) inset = Math.max(0, (q.gap - minSpan) / 2);
+                const sa = q.a1 + inset, ea = q.a1 + q.gap - inset;
+                const [sx, sy] = pt(sa, r);
+                const [ex, ey] = pt(ea, r);
+                svg += `<path class="fs-angle-arc" d="M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${r.toFixed(2)} ${r.toFixed(2)} 0 ${(ea - sa) > 180 ? 1 : 0} 0 ${ex.toFixed(2)} ${ey.toFixed(2)}" fill="none" stroke="#7c3aed" stroke-width="1.6" stroke-linecap="round" pointer-events="none"/>`;
+                const [lx, ly] = pt(q.a1 + q.gap / 2, r + 15);
+                labelLayer.addText({
+                    x: lx, y: ly + 3, text: `${Number(q.gap.toFixed(2))}°`,
+                    fontSize: 10, fontWeight: "bold", color: "#6d28d9", textAnchor: "middle",
+                    anchorX: cx, anchorY: cy, leader: false, halo: true, ownerNode: n.id,
+                });
+            });
+        });
+    }
 
     // Support symbols are shown consistently in every structural/result
     // diagram so the restrained boundary condition remains identifiable.
